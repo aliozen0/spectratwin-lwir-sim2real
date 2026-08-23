@@ -140,6 +140,17 @@ def test_read_manifest_rejects_legacy_identity_only_manifest(tmp_path: Path):
         read_manifest(path)
 
 
+def test_read_manifest_rejects_unknown_schema(tmp_path: Path):
+    manifest = build_manifests({"real_train": [_record("frame.jpg", "sequence")]}, 7)["real_train"]
+    payload = manifest.model_dump()
+    payload["schema_version"] = "spectratwin-real-manifest-v999"
+    path = tmp_path / "unknown-schema.json"
+    path.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match="unsupported schema.*fresh scan"):
+        read_manifest(path)
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     (
