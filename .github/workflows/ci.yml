@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  core-quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.13"]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.11.7"
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+
+      - name: Install locked core dependencies
+        run: uv sync --frozen
+
+      - name: Check lockfile
+        run: uv lock --check
+
+      - name: Check formatting
+        run: uv run ruff format --check .
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Type-check core modules
+        run: >-
+          uv run pyright
+          src/spectratwin/config
+          src/spectratwin/contracts
+          src/spectratwin/logging
+          src/spectratwin/randomness
+          src/spectratwin/real_data
+          src/spectratwin/remote
+
+      - name: Test core modules
+        run: >-
+          uv run pytest -q
+          tests/unit/test_cli.py
+          tests/unit/test_environment_report.py
+          tests/unit/test_flir_adapter.py
+          tests/unit/test_flir_eda.py
+          tests/unit/test_flir_split_manifest.py
+          tests/unit/test_logging.py
+          tests/unit/test_remote_staging.py
+          tests/unit/test_seed.py
+          tests/unit/test_settings.py
+
+  full-training-stack:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.11.7"
+          python-version: "3.13"
+          enable-cache: true
+
+      - name: Install locked training dependencies
+        run: uv sync --frozen --extra train
+
+      - name: Type-check full project
+        run: uv run pyright
+
+      - name: Test full project
+        run: uv run pytest -q
