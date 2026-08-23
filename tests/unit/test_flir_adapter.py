@@ -57,6 +57,16 @@ def test_scan_reports_missing_annotation_file(tmp_path):
     assert result.issues[0].category == ScanErrorCategory.MISSING_ANNOTATION_FILE
 
 
+@pytest.mark.parametrize("content", (b"\xff", b"[]"))
+def test_scan_reports_malformed_annotation_container(tmp_path, content):
+    (tmp_path / "thermal_annotations.json").write_bytes(content)
+
+    result = scan_flir_dataset(tmp_path)
+
+    assert result.records == ()
+    assert result.issues[0].category == ScanErrorCategory.CORRUPT_ANNOTATION_FILE
+
+
 def test_scan_reports_corrupt_annotation_file(tmp_path):
     (tmp_path / "thermal_annotations.json").write_text("{not json")
     result = scan_flir_dataset(tmp_path)
@@ -71,6 +81,22 @@ def test_scan_reports_missing_image(tmp_path):
 
     assert result.records == ()
     assert result.issues[0].category == ScanErrorCategory.MISSING_IMAGE
+
+
+def test_scan_reports_unreadable_image(tmp_path, monkeypatch):
+    images = [{"id": 1, "file_name": "clip_001.jpg", "width": 100, "height": 100}]
+    _write_annotations(tmp_path, images, [], CATEGORIES)
+    _touch_image(tmp_path, "clip_001.jpg")
+
+    def fail_hash(_path: Path) -> str:
+        raise OSError("fixture read failure")
+
+    monkeypatch.setattr("spectratwin.real_data.adapter._sha256_file", fail_hash)
+
+    result = scan_flir_dataset(tmp_path)
+
+    assert result.records == ()
+    assert result.issues[0].category == ScanErrorCategory.UNREADABLE_IMAGE
 
 
 def test_scan_rejects_sample_with_invalid_project_bbox(tmp_path):

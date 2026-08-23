@@ -122,11 +122,19 @@ def scan_flir_dataset(
 
     try:
         payload = json.loads(annotation_path.read_text())
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         issue = ScanIssue(
             source_id=str(annotation_path),
             category=ScanErrorCategory.CORRUPT_ANNOTATION_FILE,
             detail=str(exc),
+        )
+        return ScanResult(records=(), issues=(issue,))
+
+    if not isinstance(payload, dict):
+        issue = ScanIssue(
+            source_id=str(annotation_path),
+            category=ScanErrorCategory.CORRUPT_ANNOTATION_FILE,
+            detail="annotation file must contain a JSON object",
         )
         return ScanResult(records=(), issues=(issue,))
 
