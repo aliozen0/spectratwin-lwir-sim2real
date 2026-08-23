@@ -37,6 +37,8 @@ desktop.ini
 .envrc
 .direnv/
 .netrc
+.git-credentials
+.ssh/
 /.aws/
 .secrets/
 /secrets/
@@ -51,6 +53,12 @@ application_default_credentials.json
 *.key
 *.p12
 *.pfx
+id_rsa
+id_rsa.pub
+id_ed25519
+id_ed25519.pub
+colab_ed25519
+colab_ed25519.pub
 
 # Runtime logs and tracking stores
 *.log
