@@ -13,7 +13,9 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import torch
 from PIL import Image
+from transformers import BatchFeature
 
 from spectratwin.config.settings import ExecutionProfile, Settings
 from spectratwin.real_data.adapter import scan_flir_dataset
@@ -21,7 +23,33 @@ from spectratwin.real_data.manifest import build_manifest, write_manifest
 from spectratwin.real_data.records import FlirSampleRecord
 from spectratwin.training.config import RealSmokeTrainConfig
 from spectratwin.training.dataset import FLIR_ANNOTATION_FILENAME
-from spectratwin.training.run import run_real_smoke_training
+from spectratwin.training.run import _move_batch_to_device, run_real_smoke_training
+
+
+def test_move_batch_to_device_recurses_into_processor_labels():
+    metadata = object()
+    batch = BatchFeature(
+        data={
+            "pixel_values": torch.ones(1, 3, 4, 4),
+            "labels": [
+                {
+                    "class_labels": torch.tensor([0, 2]),
+                    "boxes": torch.ones(2, 4),
+                    "metadata": metadata,
+                }
+            ],
+            "nested_tuple": (torch.tensor([1]), "unchanged"),
+        }
+    )
+
+    moved = _move_batch_to_device(batch, torch.device("meta"))
+
+    assert moved["pixel_values"].device.type == "meta"
+    assert moved["labels"][0]["class_labels"].device.type == "meta"
+    assert moved["labels"][0]["boxes"].device.type == "meta"
+    assert moved["labels"][0]["metadata"] is metadata
+    assert moved["nested_tuple"][0].device.type == "meta"
+    assert moved["nested_tuple"][1] == "unchanged"
 
 
 def _write_flir_root(root: Path, n_images: int) -> list[FlirSampleRecord]:

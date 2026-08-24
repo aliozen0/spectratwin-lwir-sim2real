@@ -12,7 +12,7 @@ import json
 import os
 import tempfile
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -60,6 +60,19 @@ def _make_collate_fn(processor: Any) -> Callable[[list[tuple[Any, dict[str, Any]
         return processor(images=list(images), annotations=list(targets), return_tensors="pt")
 
     return collate
+
+
+def _move_batch_to_device(value: Any, device: torch.device) -> Any:
+    """Move every tensor in a processor batch, including nested labels."""
+    if isinstance(value, torch.Tensor):
+        return value.to(device)
+    if isinstance(value, Mapping):
+        return {key: _move_batch_to_device(item, device) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_move_batch_to_device(item, device) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_move_batch_to_device(item, device) for item in value)
+    return value
 
 
 def _optimization_identity(config: RealSmokeTrainConfig) -> str:
@@ -277,9 +290,10 @@ def run_real_smoke_training(
         model.train()
         step = resumed_from_step
         while step < config.max_steps:
-            batch = _training_batch_for_step(
-                train_subset, processor, config.batch_size, seed, step
-            ).to(device)
+            batch = _move_batch_to_device(
+                _training_batch_for_step(train_subset, processor, config.batch_size, seed, step),
+                device,
+            )
             outputs = model(**batch)
             loss = outputs.loss
             optimizer.zero_grad()
@@ -311,7 +325,7 @@ def run_real_smoke_training(
         eval_losses: list[float] = []
         with torch.no_grad():
             for batch in dev_loader:
-                batch = batch.to(device)
+                batch = _move_batch_to_device(batch, device)
                 outputs = model(**batch)
                 eval_losses.append(float(outputs.loss.detach().cpu()))
         final_eval_loss = sum(eval_losses) / len(eval_losses) if eval_losses else float("nan")
