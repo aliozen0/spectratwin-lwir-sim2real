@@ -234,3 +234,16 @@ def test_writer_rejects_valid_schema_with_invalid_geometry(tmp_path) -> None:
         write_coco_document(path, _document(2))
 
     assert path.read_bytes() == original
+
+
+def test_writer_wraps_an_existing_record_shape_error_without_changing_file(tmp_path) -> None:
+    path = tmp_path / "annotations.json"
+    payload = _document(1).model_dump(mode="json")
+    payload["images"][0]["unexpected"] = True
+    path.write_text(json.dumps(payload))
+    original = path.read_bytes()
+
+    with pytest.raises(CocoValidationError):
+        write_coco_document(path, _document(2))
+
+    assert path.read_bytes() == original

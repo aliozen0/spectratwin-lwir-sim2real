@@ -131,6 +131,8 @@ def _labelled_meshes(scene: Any) -> tuple[list[Any], int]:
             raise GeometryPassSceneError(f"object {obj.name!r} has invalid project category")
         seen_indices.add(raw_index)
         max_instance_id = max(max_instance_id, raw_index + 1)
+    if seen_indices != set(range(len(seen_indices))):
+        raise GeometryPassSceneError("labelled instance indices must be contiguous from zero")
     return meshes, max_instance_id
 
 
@@ -261,6 +263,10 @@ def render_geometry_pass(
             if depth_m.ndim != 2 or depth_m.shape != instance_id_map.shape:
                 raise GeometryPassDecodeError(
                     f"depth shape {depth_m.shape} differs from instances {instance_id_map.shape}"
+                )
+            if not np.all(np.isfinite(depth_m)) or np.any(depth_m <= 0.0):
+                raise GeometryPassDecodeError(
+                    "depth EXR contains non-finite or non-positive values"
                 )
         finally:
             if scene.node_tree is not None:

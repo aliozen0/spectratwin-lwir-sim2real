@@ -44,6 +44,7 @@ def test_validator_rejects_non_mapping_document() -> None:
     ("mutate", "expected"),
     [
         (lambda doc: doc.update(schema_version="old"), ValidationCode.SCHEMA_VERSION),
+        (lambda doc: doc.update(unexpected=True), ValidationCode.DOCUMENT_SHAPE),
         (
             lambda doc: doc.update(categories=list(reversed(doc["categories"]))),
             ValidationCode.CATEGORY_SCHEMA,

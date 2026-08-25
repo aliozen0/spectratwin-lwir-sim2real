@@ -11,7 +11,7 @@ from pathlib import Path, PurePosixPath
 from typing import Literal, Self
 
 import numpy as np
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from spectratwin.annotation.masks import derive_semantic_map, extract_visible_instances
 from spectratwin.annotation.policy import AnnotationPolicy, ExclusionReason
@@ -326,7 +326,10 @@ def write_coco_document(path: Path, document: CocoDocument) -> CocoDocument:
     # JSON arrays deserialize as lists. Field-level strict integers still
     # reject coercive scalar changes while pydantic freezes list containers as
     # the tuple-based persisted models.
-    validated = CocoDocument.model_validate(merged)
+    try:
+        validated = CocoDocument.model_validate(merged)
+    except ValidationError as exc:
+        raise CocoValidationError("merged document does not match the persisted schema") from exc
 
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path: Path | None = None

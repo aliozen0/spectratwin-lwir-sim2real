@@ -14,6 +14,7 @@ from pydantic import ValidationError
 from spectratwin.annotation.coco import (
     ANNOTATION_ID_STRIDE,
     COCO_DOCUMENT_SCHEMA_VERSION,
+    CocoDocument,
     deterministic_annotation_id,
     project_category_records,
 )
@@ -406,5 +407,14 @@ def validate_coco_document(document: object) -> tuple[ValidationIssue, ...]:
                     f"images[id={image_id}].objects[instance_index={instance_index}]",
                     "included flag disagrees with annotation presence",
                 )
+
+    try:
+        CocoDocument.model_validate(document)
+    except (TypeError, ValidationError):
+        add(
+            ValidationCode.DOCUMENT_SHAPE,
+            "$",
+            "document contains missing, extra or invalid persisted fields",
+        )
 
     return tuple(issues)
