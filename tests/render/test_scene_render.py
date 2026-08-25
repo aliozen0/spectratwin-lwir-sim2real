@@ -119,3 +119,30 @@ def test_camera_horizontal_field_of_view_matches_the_intrinsics() -> None:
     camera = bpy.context.scene.camera.data
     assert camera.sensor_fit == "HORIZONTAL"
     assert math.degrees(camera.angle_x) == pytest.approx(45.0, rel=1e-6)
+
+
+def test_scene_objects_carry_deterministic_annotation_identity() -> None:
+    import bpy  # type: ignore[import-not-found]
+
+    from spectratwin.render.runtime import reset_scene
+    from spectratwin.render.scene_builder import (
+        CATEGORY_PROPERTY,
+        INSTANCE_INDEX_PROPERTY,
+        build_scene,
+    )
+
+    scene = _tiny_scene()
+    reset_scene()
+    build_scene(scene=scene, ambient_temperature_k=293.15, master_seed=0)
+
+    labelled = [obj for obj in bpy.context.scene.objects if INSTANCE_INDEX_PROPERTY in obj]
+    labelled.sort(key=lambda obj: int(obj[INSTANCE_INDEX_PROPERTY]))
+    assert [int(obj[INSTANCE_INDEX_PROPERTY]) for obj in labelled] == list(
+        range(len(scene.objects))
+    )
+    assert [str(obj[CATEGORY_PROPERTY]) for obj in labelled] == [
+        placed.category for placed in scene.objects
+    ]
+    ground = bpy.data.objects["ground"]
+    assert INSTANCE_INDEX_PROPERTY not in ground
+    assert CATEGORY_PROPERTY not in ground

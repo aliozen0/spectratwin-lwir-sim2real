@@ -52,6 +52,12 @@ GROUND_SIZE_M = 400.0
 #: SPEC-007 records it as an open question.
 SKY_OFFSET_K = 20.0
 
+#: Blender custom-property names that bind realised objects back to the
+#: renderer-independent ``SceneDescription.objects`` order. The zero-based
+#: index becomes ``instance_id = index + 1`` in SPEC-005's geometry pass.
+INSTANCE_INDEX_PROPERTY = "spectratwin_instance_index"
+CATEGORY_PROPERTY = "spectratwin_category"
+
 
 def _add_object_primitive(placed: PlacedObject) -> Any:
     """Add one box sized from the placed object's recorded footprint."""
@@ -100,6 +106,8 @@ def build_scene(*, scene: SceneDescription, ambient_temperature_k: float, master
             rng, ambient_temperature_k=ambient_temperature_k
         )
         primitive = _add_object_primitive(placed)
+        primitive[INSTANCE_INDEX_PROPERTY] = index
+        primitive[CATEGORY_PROPERTY] = placed.category
         primitive.data.materials.append(
             build_thermal_material(
                 f"thermal_{placed.category}_{index}",
