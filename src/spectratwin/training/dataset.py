@@ -71,6 +71,11 @@ class FlirDetectionDataset(Dataset[tuple[Image.Image, dict[str, Any]]]):
         self._records = records
         self._image_root = image_root
 
+    @property
+    def records(self) -> list[FlirSampleRecord]:
+        """Records in the exact order ``__getitem__`` indexes them."""
+        return self._records
+
     def __len__(self) -> int:
         return len(self._records)
 
