@@ -21,6 +21,9 @@ train = [
     "torchvision==0.24.1",
     "transformers==5.9.0",
 ]
+render = [
+    "blenderproc==2.8.0",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -49,3 +52,7 @@ typeCheckingMode = "standard"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "renderer: requires BlenderProc and its pinned Blender; run with -m renderer",
+]
+addopts = "-m 'not renderer'"
