@@ -25,6 +25,14 @@ from spectratwin.thermal.constants import (
 #: Maps a wavelength array (meters) to a unitless response array, same shape.
 SensorResponse = Callable[[np.ndarray], np.ndarray]
 
+#: NumPy 2.0 renamed ``trapz`` to ``trapezoid`` and removed the old name; the
+#: implementation is the same, so this alias changes no numerical result. It
+#: exists because ADR-003 makes the renderer and trainer separate runtimes and
+#: they do not agree on NumPy: Blender 4.2.1 embeds 1.24.3 (``trapz`` only)
+#: while the project environment resolves 2.x (``trapezoid`` only). Core domain
+#: code has to import cleanly in both.
+_trapezoid = getattr(np, "trapezoid", None) or np.trapz  # type: ignore[attr-defined]
+
 
 def _uniform_sensor_response(wavelength_m: np.ndarray) -> np.ndarray:
     """Documented default: flat unit response across the configured band."""
@@ -101,4 +109,4 @@ def band_radiance(
     ) + (1.0 - transmittance) * planck_spectral_radiance(wavelengths_m, atmospheric_temperature_k)
 
     weighted = spectral_radiance * sensor_response(wavelengths_m)
-    return float(np.trapezoid(weighted, wavelengths_m))
+    return float(_trapezoid(weighted, wavelengths_m))
