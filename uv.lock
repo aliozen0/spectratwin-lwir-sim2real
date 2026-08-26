@@ -2797,6 +2797,7 @@ render = [
     { name = "blenderproc" },
 ]
 train = [
+    { name = "matplotlib" },
     { name = "mlflow" },
     { name = "torch" },
     { name = "torchmetrics", extra = ["detection"] },
@@ -2814,6 +2815,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "blenderproc", marker = "extra == 'render'", specifier = "==2.8.0" },
+    { name = "matplotlib", marker = "extra == 'train'", specifier = ">=3.9" },
     { name = "mlflow", marker = "extra == 'train'", specifier = "==3.9.0" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "pydantic", specifier = ">=2.6" },
