@@ -60,6 +60,7 @@ class RealBaselineTrainConfig(BaseModel):
     warmup_steps: int = Field(default=2_000, ge=0)
     gradient_clip_norm: float = Field(default=0.1, gt=0)
     checkpoint_interval_epochs: int = Field(default=5, gt=0)
+    checkpoint_interval_steps: int | None = Field(default=None, gt=0)
     precision: Literal["fp32", "bf16"] = "fp32"
     device: str = "cuda"
     num_workers: int = Field(default=4, ge=0)

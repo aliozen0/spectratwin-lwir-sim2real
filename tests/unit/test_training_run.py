@@ -359,3 +359,81 @@ def test_run_real_baseline_persists_and_resumes_complete_dataset(tmp_path):
     assert bundle["schema_version"] == BASELINE_CHECKPOINT_SCHEMA_VERSION
     assert bundle["target_epochs"] == 2
     assert bundle["completed_epochs"] == 2
+
+
+def test_run_real_baseline_checkpoints_and_resumes_mid_epoch(tmp_path):
+    train_root = tmp_path / "train_root"
+    dev_root = tmp_path / "dev_root"
+    train_root.mkdir()
+    dev_root.mkdir()
+    train_records = _write_flir_root(train_root, 4)
+    dev_records = _write_flir_root(dev_root, 1)
+    train_manifest = build_manifest("real_train", train_records, master_seed=0)
+    dev_manifest = build_manifest("real_dev", dev_records, master_seed=0)
+    train_manifest_path = tmp_path / "real_train.json"
+    dev_manifest_path = tmp_path / "real_dev.json"
+    write_manifest(train_manifest, train_manifest_path)
+    write_manifest(dev_manifest, dev_manifest_path)
+
+    # Separate persistent dirs for the "crashed" run and the resumed run: a
+    # real crash never reaches the epoch-end write, so nothing here should
+    # need to write model-epoch-001.pt twice to the same destination.
+    crashed_persistent_dir = tmp_path / "persistent-crashed" / "checkpoints"
+    resumed_persistent_dir = tmp_path / "persistent-resumed" / "checkpoints"
+    common = {
+        "train_manifest_path": train_manifest_path,
+        "dev_manifest_path": dev_manifest_path,
+        "flir_train_root": train_root,
+        "flir_dev_root": dev_root,
+        "epochs": 1,
+        "batch_size": 1,
+        "warmup_steps": 0,
+        "checkpoint_interval_epochs": 1,
+        "checkpoint_interval_steps": 2,
+        "device": "cpu",
+        "precision": "fp32",
+        "num_workers": 0,
+        "run_id": "r100-mid-epoch-test",
+    }
+
+    first_settings = Settings(
+        execution_profile=ExecutionProfile.WSL,
+        master_seed=0,
+        data_root=tmp_path,
+        cache_root=tmp_path,
+        artifact_root=tmp_path / "first-run-artifacts",
+    )
+    run_real_baseline_training(
+        RealBaselineTrainConfig(**common, persistent_checkpoint_dir=crashed_persistent_dir),
+        first_settings,
+        model_factory=_tiny_model_factory(),
+    )
+
+    mid_epoch_candidates = sorted(crashed_persistent_dir.glob("model-epoch-000-step-000002-*.pt"))
+    assert len(mid_epoch_candidates) == 1
+    mid_epoch_checkpoint = mid_epoch_candidates[0]
+    assert mid_epoch_checkpoint.with_name(f"{mid_epoch_checkpoint.name}.COMPLETED.json").exists()
+    mid_bundle = torch.load(mid_epoch_checkpoint, map_location="cpu", weights_only=True)
+    assert mid_bundle["completed_epochs"] == 0
+    assert mid_bundle["completed_steps"] == 2
+    assert mid_bundle["partial_epoch_steps"] == 2
+
+    resumed_settings = first_settings.model_copy(
+        update={"artifact_root": tmp_path / "resumed-run-artifacts"}
+    )
+    resumed = run_real_baseline_training(
+        RealBaselineTrainConfig(
+            **common,
+            persistent_checkpoint_dir=resumed_persistent_dir,
+            resume_from_checkpoint=mid_epoch_checkpoint,
+        ),
+        resumed_settings,
+        model_factory=_tiny_model_factory(),
+    )
+
+    assert resumed.resumed_from_epoch == 0
+    assert resumed.complete is True
+    assert resumed.completed_epochs == 1
+    assert resumed.completed_steps == 4
+    assert math.isfinite(resumed.final_train_loss)
+    assert math.isfinite(resumed.final_dev_loss)

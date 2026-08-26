@@ -8,6 +8,7 @@ reconstruct the run.
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import math
 import os
@@ -74,6 +75,10 @@ class RealBaselineCheckpointMetadata(BaseModel):
     checkpoint_id: str
     checkpoint_revision: str
     precision: str
+    #: Steps already trained into ``completed_epochs`` (the next, still
+    #: in-progress epoch); 0 for a checkpoint saved at an epoch boundary.
+    #: Absent on checkpoints written before mid-epoch checkpointing existed.
+    partial_epoch_steps: int = 0
 
 
 class RealBaselineTrainResult(BaseModel):
@@ -485,12 +490,14 @@ def _baseline_checkpoint_bundle(
     dev_fingerprint: str,
     git_sha: str,
     config: RealBaselineTrainConfig,
+    partial_epoch_steps: int = 0,
 ) -> dict[str, Any]:
     return {
         "schema_version": BASELINE_CHECKPOINT_SCHEMA_VERSION,
         "run_id": run_id,
         "completed_epochs": completed_epochs,
         "completed_steps": completed_steps,
+        "partial_epoch_steps": partial_epoch_steps,
         "target_epochs": config.epochs,
         "config_identity": config_identity,
         "seed": seed,
@@ -526,7 +533,7 @@ def load_real_baseline_model_checkpoint(
     """Load a baseline model state and return its validated portable metadata."""
     bundle = _read_baseline_checkpoint(path, device)
     metadata = RealBaselineCheckpointMetadata.model_validate(
-        {key: bundle.get(key) for key in RealBaselineCheckpointMetadata.model_fields}
+        {key: bundle[key] for key in RealBaselineCheckpointMetadata.model_fields if key in bundle}
     )
     model.load_state_dict(bundle["model_state_dict"])
     return metadata
@@ -541,7 +548,7 @@ def load_real_baseline_checkpoint(
     """Construct the recorded model and load one completed baseline checkpoint."""
     bundle = _read_baseline_checkpoint(path, device)
     metadata = RealBaselineCheckpointMetadata.model_validate(
-        {key: bundle.get(key) for key in RealBaselineCheckpointMetadata.model_fields}
+        {key: bundle[key] for key in RealBaselineCheckpointMetadata.model_fields if key in bundle}
     )
     model, processor = model_factory(metadata.checkpoint_id, metadata.checkpoint_revision)
     model.load_state_dict(bundle["model_state_dict"])
@@ -561,7 +568,7 @@ def _load_baseline_resume_checkpoint(
     dev_fingerprint: str,
     git_sha: str,
     device: torch.device,
-) -> tuple[int, int]:
+) -> tuple[int, int, int]:
     bundle = _read_baseline_checkpoint(path, device)
     expected = {
         "run_id": config.run_id,
@@ -581,13 +588,16 @@ def _load_baseline_resume_checkpoint(
         )
     completed_epochs = bundle.get("completed_epochs")
     completed_steps = bundle.get("completed_steps")
+    partial_epoch_steps = bundle.get("partial_epoch_steps", 0)
     if not isinstance(completed_epochs, int) or completed_epochs < 0:
         raise ValueError("baseline checkpoint has invalid completed_epochs")
     if not isinstance(completed_steps, int) or completed_steps < 0:
         raise ValueError("baseline checkpoint has invalid completed_steps")
+    if not isinstance(partial_epoch_steps, int) or partial_epoch_steps < 0:
+        raise ValueError("baseline checkpoint has invalid partial_epoch_steps")
     model.load_state_dict(bundle["model_state_dict"])
     optimizer.load_state_dict(bundle["optimizer_state_dict"])
-    return completed_epochs, completed_steps
+    return completed_epochs, completed_steps, partial_epoch_steps
 
 
 def _baseline_data_loader(
@@ -654,18 +664,21 @@ def run_real_baseline_training(
 
     resumed_from_epoch = 0
     completed_steps = 0
+    resumed_partial_epoch_steps = 0
     if config.resume_from_checkpoint is not None:
-        resumed_from_epoch, completed_steps = _load_baseline_resume_checkpoint(
-            config.resume_from_checkpoint,
-            model=model,
-            optimizer=optimizer,
-            config=config,
-            config_identity=config_identity,
-            seed=seed,
-            train_fingerprint=train_manifest.fingerprint,
-            dev_fingerprint=dev_manifest.fingerprint,
-            git_sha=git_sha,
-            device=device,
+        resumed_from_epoch, completed_steps, resumed_partial_epoch_steps = (
+            _load_baseline_resume_checkpoint(
+                config.resume_from_checkpoint,
+                model=model,
+                optimizer=optimizer,
+                config=config,
+                config_identity=config_identity,
+                seed=seed,
+                train_fingerprint=train_manifest.fingerprint,
+                dev_fingerprint=dev_manifest.fingerprint,
+                git_sha=git_sha,
+                device=device,
+            )
         )
     if resumed_from_epoch >= config.epochs:
         raise ValueError("baseline checkpoint already reached the configured target epochs")
@@ -727,9 +740,14 @@ def run_real_baseline_training(
                 seed=epoch_seed,
                 pin_memory=pin_memory,
             )
+            skip_batches = resumed_partial_epoch_steps if epoch_index == resumed_from_epoch else 0
+            steps_this_epoch = skip_batches
+            batch_iter: Any = (
+                itertools.islice(train_loader, skip_batches, None) if skip_batches else train_loader
+            )
             model.train()
             epoch_train_losses: list[float] = []
-            for batch in train_loader:
+            for batch in batch_iter:
                 _apply_linear_warmup(
                     optimizer,
                     completed_steps=completed_steps,
@@ -758,6 +776,46 @@ def run_real_baseline_training(
                     "learning_rate", float(optimizer.param_groups[0]["lr"]), step=completed_steps
                 )
                 completed_steps += 1
+                steps_this_epoch += 1
+
+                if (
+                    config.checkpoint_interval_steps is not None
+                    and steps_this_epoch % config.checkpoint_interval_steps == 0
+                ):
+                    _save_checkpoint_atomically(
+                        checkpoint_path,
+                        _baseline_checkpoint_bundle(
+                            model=model,
+                            optimizer=optimizer,
+                            completed_epochs=epoch_index,
+                            completed_steps=completed_steps,
+                            run_id=config.run_id,
+                            config_identity=config_identity,
+                            seed=seed,
+                            train_fingerprint=train_manifest.fingerprint,
+                            dev_fingerprint=dev_manifest.fingerprint,
+                            git_sha=git_sha,
+                            config=config,
+                            partial_epoch_steps=steps_this_epoch,
+                        ),
+                    )
+                    if config.persistent_checkpoint_dir is not None:
+                        # Each interval hit gets its own destination: persist_file
+                        # refuses to overwrite an already-completed marker with
+                        # different content, and a resumed invocation can reach
+                        # the same step count as the run it resumed from. The
+                        # physical MLflow run id makes the name unique per
+                        # invocation even when the step count repeats.
+                        mid_epoch_path = (
+                            config.persistent_checkpoint_dir
+                            / f"model-epoch-{epoch_index:03d}-step-{completed_steps:06d}"
+                            f"-{active_run.info.run_id[:8]}.pt"
+                        )
+                        transfer = persist_file(checkpoint_path, mid_epoch_path)
+                        if transfer.completion_marker_name is None:
+                            raise RuntimeError(
+                                "persisted mid-epoch checkpoint is missing its completion marker"
+                            )
 
             dev_loader = _baseline_data_loader(
                 dev_dataset,
