@@ -112,10 +112,31 @@ def _load_manifest(path: Path) -> DatasetManifest:
     return read_manifest(path)
 
 
-def _make_collate_fn(processor: Any) -> Callable[[list[tuple[Any, dict[str, Any]]]], Any]:
+#: SPEC-010 real-only baseline: mirrors the cited recipe's
+#: ``dataloader.yml`` collate-time ``scales`` list (multiscale training).
+#: 640 repeats 3x there (the base resolution), so it does here too.
+MULTISCALE_SIZES = (480, 512, 544, 576, 608, 640, 640, 640, 672, 704, 736, 768, 800)
+
+
+def _make_collate_fn(
+    processor: Any, *, multiscale_seed: int | None = None
+) -> Callable[[list[tuple[Any, dict[str, Any]]]], Any]:
     def collate(batch: list[tuple[Any, dict[str, Any]]]) -> Any:
         images, targets = zip(*batch, strict=True)
-        return processor(images=list(images), annotations=list(targets), return_tensors="pt")
+        kwargs: dict[str, Any] = {}
+        if multiscale_seed is not None:
+            # Derived from the batch's own (epoch-shuffled) sample identity
+            # rather than a shared counter: collate runs inside DataLoader
+            # worker processes, so a mutable per-worker counter would not
+            # give one consistent, reproducible scale sequence across
+            # workers. Hashing the batch's own content does.
+            image_ids = tuple(sorted(target["image_id"] for target in targets))
+            batch_seed = derive_subseed(multiscale_seed, "multiscale-batch", str(image_ids))
+            size = MULTISCALE_SIZES[batch_seed % len(MULTISCALE_SIZES)]
+            kwargs["size"] = {"height": size, "width": size}
+        return processor(
+            images=list(images), annotations=list(targets), return_tensors="pt", **kwargs
+        )
 
     return collate
 
@@ -673,6 +694,7 @@ def _baseline_data_loader(
     shuffle: bool,
     seed: int,
     pin_memory: bool,
+    multiscale_seed: int | None = None,
 ) -> DataLoader[Any]:
     generator = torch.Generator()
     generator.manual_seed(seed)
@@ -684,7 +706,7 @@ def _baseline_data_loader(
         num_workers=num_workers,
         pin_memory=pin_memory,
         persistent_workers=num_workers > 0,
-        collate_fn=_make_collate_fn(processor),
+        collate_fn=_make_collate_fn(processor, multiscale_seed=multiscale_seed),
     )
 
 
@@ -796,14 +818,21 @@ def run_real_baseline_training(
 
         for epoch_index in range(resumed_from_epoch, invocation_target):
             epoch_seed = derive_subseed(seed, "train-epoch", str(epoch_index))
+            # Cited recipe's ``policy: stop_epoch: 71`` (out of 72): the
+            # aggressive per-sample ops and multiscale collation both stand
+            # down for the final epoch, leaving only the horizontal flip.
+            is_final_epoch = epoch_index == config.epochs - 1
             train_loader = _baseline_data_loader(
-                wrap_with_train_augmentation(train_dataset, epoch_seed),
+                wrap_with_train_augmentation(
+                    train_dataset, epoch_seed, aggressive=not is_final_epoch
+                ),
                 processor=processor,
                 batch_size=config.batch_size,
                 num_workers=config.num_workers,
                 shuffle=True,
                 seed=epoch_seed,
                 pin_memory=pin_memory,
+                multiscale_seed=None if is_final_epoch else epoch_seed,
             )
             skip_batches = resumed_partial_epoch_steps if epoch_index == resumed_from_epoch else 0
             steps_this_epoch = skip_batches

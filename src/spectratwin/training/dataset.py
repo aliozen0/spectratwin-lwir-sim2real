@@ -12,10 +12,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from PIL import Image, ImageEnhance
+import torch
+from PIL import Image
 from torch.utils.data import Dataset
+from torchvision import tv_tensors
+from torchvision.transforms import v2 as tv_transforms
 
-from spectratwin.randomness.seed import new_generator
+from spectratwin.randomness.seed import derive_subseed
 from spectratwin.real_data.adapter import resolve_source_path, scan_flir_dataset
 from spectratwin.real_data.manifest import DatasetManifest, build_manifest
 from spectratwin.real_data.records import FlirSampleRecord
@@ -110,45 +113,108 @@ def load_training_dataset(
     return FlirDetectionDataset(records, flir_source_root)
 
 
-class AugmentedFlirDataset(Dataset[tuple[Image.Image, dict[str, Any]]]):
-    """Train-only wrapper: horizontal flip (SPEC-010 real-only baseline).
+def _record_index_getter(inputs: Any) -> torch.Tensor:
+    """``SanitizeBoundingBoxes`` labels_getter: filter our index tensor in
+    lockstep with whatever boxes ``RandomIoUCrop``/etc. drop, so dropped
+    boxes' original annotation dicts (category/iscrowd/id) can still be
+    found afterward."""
+    return inputs[1]["record_index"]
 
-    Adds brightness/contrast jitter. No hue/saturation: thermal frames are
-    single-channel data replicated into an RGB triplet, so those channels
-    carry nothing physical to perturb. Randomness is derived per (epoch_seed,
-    index), never from hidden global state, so it stays reproducible across
-    epochs and safe under a multi-worker ``DataLoader``.
+
+#: Mirrors the cited RT-DETR/RT-DETRv2 recipe's ``dataloader.yml`` per-sample
+#: ops (``RandomPhotometricDistort``, ``RandomZoomOut``, ``RandomIoUCrop``,
+#: ``SanitizeBoundingBoxes``, ``RandomHorizontalFlip``) using torchvision's
+#: own implementations of the same named transforms rather than reimplementing
+#: box-clipping/filtering math by hand. The recipe's own final ``Resize`` step
+#: is left to the HF image processor at collate time (SPEC-010), which already
+#: owns resizing; running it twice here would be redundant.
+_AGGRESSIVE_TRAIN_TRANSFORM = tv_transforms.Compose(
+    [
+        tv_transforms.RandomPhotometricDistort(p=0.5),
+        tv_transforms.RandomZoomOut(fill=0),
+        tv_transforms.RandomApply([tv_transforms.RandomIoUCrop()], p=0.8),
+        tv_transforms.SanitizeBoundingBoxes(min_size=1, labels_getter=_record_index_getter),
+        tv_transforms.RandomHorizontalFlip(p=0.5),
+    ]
+)
+
+#: The recipe's ``policy: stop_epoch: 71`` (out of 72): flip stays active in
+#: the final epoch, the three more aggressive/geometric ops do not.
+_FLIP_ONLY_TRAIN_TRANSFORM = tv_transforms.Compose([tv_transforms.RandomHorizontalFlip(p=0.5)])
+
+
+class AugmentedFlirDataset(Dataset[tuple[Image.Image, dict[str, Any]]]):
+    """Train-only wrapper applying SPEC-010's augmentation policy for one epoch.
+
+    No hue/saturation perturbation carries physical meaning on FLIR thermal
+    frames (single-channel data replicated into an RGB triplet, so every
+    pixel already has zero saturation) — ``RandomPhotometricDistort``'s
+    hue/saturation jitter is therefore a harmless no-op here, not a risk,
+    so the full upstream transform is used unmodified rather than a
+    thermal-specific subset. Randomness is derived per (epoch_seed, index)
+    via a scoped ``torch.random.fork_rng`` + ``manual_seed`` (restored on
+    exit, so global RNG state and other workers are unaffected) rather than
+    hidden global state, keeping it reproducible and multi-worker-safe.
     """
 
-    def __init__(self, base: Dataset[tuple[Image.Image, dict[str, Any]]], epoch_seed: int) -> None:
+    def __init__(
+        self,
+        base: Dataset[tuple[Image.Image, dict[str, Any]]],
+        epoch_seed: int,
+        *,
+        aggressive: bool = True,
+    ) -> None:
         self._base = base
         self._epoch_seed = epoch_seed
+        self._transform = _AGGRESSIVE_TRAIN_TRANSFORM if aggressive else _FLIP_ONLY_TRAIN_TRANSFORM
 
     def __len__(self) -> int:
         return len(self._base)  # type: ignore[arg-type]
 
     def __getitem__(self, index: int) -> tuple[Image.Image, dict[str, Any]]:
         image, target = self._base[index]
-        generator = new_generator(self._epoch_seed, "augment", str(index))
+        annotations = target["annotations"]
+        width, height = image.size
+        boxes_xyxy = torch.tensor(
+            [
+                [x, y, x + w, y + h]
+                for x, y, w, h in (annotation["bbox"] for annotation in annotations)
+            ],
+            dtype=torch.float32,
+        ).reshape(-1, 4)
+        sample_target = {
+            # torchvision's BoundingBoxes stub types __init__ against the
+            # torch.Tensor overloads rather than its actual __new__ keyword
+            # signature (format=/canvas_size=); verified working at runtime.
+            "boxes": tv_tensors.BoundingBoxes(  # type: ignore[reportCallIssue]
+                boxes_xyxy, format=tv_tensors.BoundingBoxFormat.XYXY, canvas_size=(height, width)
+            ),
+            "record_index": torch.arange(len(annotations), dtype=torch.long),
+        }
 
-        if generator.random() < 0.5:
-            width, _height = image.size
-            image = image.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
-            flipped_annotations = []
-            for annotation in target["annotations"]:
-                x, y, w, h = annotation["bbox"]
-                flipped_annotations.append({**annotation, "bbox": [width - x - w, y, w, h]})
-            target = {**target, "annotations": flipped_annotations}
+        seed = derive_subseed(self._epoch_seed, "augment", str(index))
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(seed)
+            image, transformed = self._transform(image, sample_target)
 
-        brightness = float(generator.uniform(0.8, 1.2))
-        contrast = float(generator.uniform(0.8, 1.2))
-        image = ImageEnhance.Brightness(image).enhance(brightness)
-        image = ImageEnhance.Contrast(image).enhance(contrast)
-        return image, target
+        new_annotations = []
+        for box, original_index in zip(
+            transformed["boxes"].tolist(), transformed["record_index"].tolist(), strict=True
+        ):
+            x1, y1, x2, y2 = box
+            w, h = x2 - x1, y2 - y1
+            new_annotations.append(
+                {**annotations[original_index], "bbox": [x1, y1, w, h], "area": w * h}
+            )
+        return image, {**target, "annotations": new_annotations}
 
 
 def wrap_with_train_augmentation(
-    base: Dataset[tuple[Image.Image, dict[str, Any]]], epoch_seed: int
+    base: Dataset[tuple[Image.Image, dict[str, Any]]], epoch_seed: int, *, aggressive: bool = True
 ) -> AugmentedFlirDataset:
-    """Wrap a training dataset with SPEC-010's train-only augmentation for one epoch."""
-    return AugmentedFlirDataset(base, epoch_seed)
+    """Wrap a training dataset with SPEC-010's train-only augmentation for one epoch.
+
+    ``aggressive=False`` drops to flip-only, matching the cited recipe's
+    ``stop_epoch`` policy for the final training epoch.
+    """
+    return AugmentedFlirDataset(base, epoch_seed, aggressive=aggressive)

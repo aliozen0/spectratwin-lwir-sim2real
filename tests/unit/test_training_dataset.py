@@ -175,19 +175,63 @@ def test_augmented_dataset_varies_across_epoch_seeds(tmp_path):
     assert len(outcomes) > 1
 
 
-def test_augmented_dataset_flip_mirrors_bounding_box(tmp_path):
+def test_flip_only_pipeline_mirrors_bounding_box_and_preserves_size(tmp_path):
+    # aggressive=False isolates flip from RandomZoomOut/RandomIoUCrop so the
+    # exact mirrored coordinate can be asserted deterministically; the
+    # aggressive pipeline can also change canvas size, which would make a
+    # literal "width - x - w" check meaningless.
     root = _tiny_root(tmp_path)
     manifest = build_manifest("real_train", _scan_records(root), master_seed=0)
     dataset = load_training_dataset(manifest, root)
     base_image, base_target = dataset[0]
-    width, _ = base_image.size
+    width, height = base_image.size
     original_x, _y, original_w, _h = base_target["annotations"][0]["bbox"]
 
     flipped = next(
-        target
+        (image, target)
         for seed in range(50)
-        for _image, target in [wrap_with_train_augmentation(dataset, epoch_seed=seed)[0]]
+        for image, target in [
+            wrap_with_train_augmentation(dataset, epoch_seed=seed, aggressive=False)[0]
+        ]
         if target["annotations"][0]["bbox"][0] != original_x
     )
+    flipped_image, flipped_target = flipped
 
-    assert flipped["annotations"][0]["bbox"][0] == width - original_x - original_w
+    assert flipped_image.size == (width, height)
+    assert flipped_target["annotations"][0]["bbox"][0] == width - original_x - original_w
+    assert (
+        flipped_target["annotations"][0]["category_id"]
+        == base_target["annotations"][0]["category_id"]
+    )
+
+
+def test_aggressive_pipeline_never_invents_boxes_and_stays_in_canvas(tmp_path):
+    root = _tiny_root(tmp_path)
+    manifest = build_manifest("real_train", _scan_records(root), master_seed=0)
+    dataset = load_training_dataset(manifest, root)
+    original_count = len(dataset[0][1]["annotations"])
+
+    for seed in range(20):
+        image, target = wrap_with_train_augmentation(dataset, epoch_seed=seed)[0]
+        width, height = image.size
+        assert len(target["annotations"]) <= original_count
+        for annotation in target["annotations"]:
+            x, y, w, h = annotation["bbox"]
+            assert w > 0
+            assert h > 0
+            assert x >= -1e-3
+            assert y >= -1e-3
+            assert x + w <= width + 1e-3
+            assert y + h <= height + 1e-3
+
+
+def test_aggressive_pipeline_handles_zero_annotation_images(tmp_path):
+    images = [{"id": 1, "file_name": "a.jpg", "width": 100, "height": 100}]
+    _write_flir_root(tmp_path, images, annotations=[])
+    manifest = build_manifest("real_train", _scan_records(tmp_path), master_seed=0)
+    dataset = load_training_dataset(manifest, tmp_path)
+
+    image, target = wrap_with_train_augmentation(dataset, epoch_seed=0)[0]
+
+    assert target["annotations"] == []
+    assert image.size[0] > 0 and image.size[1] > 0
