@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -141,6 +142,32 @@ def _cmd_evaluate_real_benchmark(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_report_training_loss(args: argparse.Namespace) -> int:
+    from spectratwin.training.report import build_training_loss_report
+
+    written = build_training_loss_report(
+        tracking_uri=f"file:{args.mlruns_dir}",
+        experiment_name=args.experiment_name,
+        run_id=args.run_id,
+        output_dir=Path(args.output_dir),
+    )
+    print(json.dumps({name: str(path) for name, path in written.items()}, indent=2))
+    return 0
+
+
+def _cmd_report_confusion_matrix(args: argparse.Namespace) -> int:
+    from spectratwin.training.report import build_confusion_matrix_report
+
+    written = build_confusion_matrix_report(
+        predictions_artifact_path=Path(args.predictions),
+        output_dir=Path(args.output_dir),
+        iou_threshold=args.iou_threshold,
+        score_threshold=args.score_threshold,
+    )
+    print(json.dumps({name: str(path) for name, path in written.items()}, indent=2))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="spectratwin")
     parser.add_argument("--version", action="store_true", help="print version and exit")
@@ -237,6 +264,27 @@ def build_parser() -> argparse.ArgumentParser:
     real_benchmark_parser.add_argument("--device", default="cuda")
     real_benchmark_parser.add_argument("--score-threshold", type=float, default=0.0)
     real_benchmark_parser.set_defaults(func=_cmd_evaluate_real_benchmark)
+
+    report_parser = subparsers.add_parser("report", help="diagnostic plots and tables")
+    report_subparsers = report_parser.add_subparsers(dest="report_command", required=True)
+
+    training_loss_parser = report_subparsers.add_parser(
+        "training-loss", help="loss-curve plot and metric tables for one MLflow run"
+    )
+    training_loss_parser.add_argument("--mlruns-dir", required=True)
+    training_loss_parser.add_argument("--experiment-name", default="real-only-baseline")
+    training_loss_parser.add_argument("--run-id", required=True)
+    training_loss_parser.add_argument("--output-dir", required=True)
+    training_loss_parser.set_defaults(func=_cmd_report_training_loss)
+
+    confusion_matrix_parser = report_subparsers.add_parser(
+        "confusion-matrix", help="confusion-matrix heatmap from a saved predictions artifact"
+    )
+    confusion_matrix_parser.add_argument("--predictions", required=True)
+    confusion_matrix_parser.add_argument("--output-dir", required=True)
+    confusion_matrix_parser.add_argument("--iou-threshold", type=float, default=0.5)
+    confusion_matrix_parser.add_argument("--score-threshold", type=float, default=0.5)
+    confusion_matrix_parser.set_defaults(func=_cmd_report_confusion_matrix)
 
     return parser
 
