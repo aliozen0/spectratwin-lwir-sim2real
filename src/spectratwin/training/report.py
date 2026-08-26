@@ -11,11 +11,15 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 from pathlib import Path
 
-import matplotlib
+# Must happen before ``import matplotlib``: matplotlib reads MPLBACKEND at
+# import time (e.g. Colab/Jupyter sets it to an inline backend that isn't
+# valid outside a notebook kernel), so matplotlib.use("Agg") after the
+# import is already too late to prevent that crash.
+os.environ["MPLBACKEND"] = "Agg"
 
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import torch
 from mlflow.tracking import MlflowClient
