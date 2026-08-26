@@ -14,6 +14,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
+from mlflow.tracking import MlflowClient
 from PIL import Image
 from transformers import BatchFeature
 
@@ -399,6 +400,15 @@ def test_run_real_baseline_persists_and_resumes_complete_dataset(tmp_path):
     assert bundle["ema_state_dict"].keys() == bundle["model_state_dict"].keys()
     for name, tensor in bundle["ema_state_dict"].items():
         assert tensor.shape == bundle["model_state_dict"][name].shape
+
+    resumed_artifact_root = resumed_settings.artifact_root
+    assert resumed_artifact_root is not None
+    client = MlflowClient(tracking_uri=f"file:{resumed_artifact_root / 'mlruns'}")
+    ema_dev_history = client.get_metric_history(resumed.mlflow_run_id, "ema_dev_loss")
+    dev_history = client.get_metric_history(resumed.mlflow_run_id, "dev_loss")
+    assert len(ema_dev_history) == 1
+    assert math.isfinite(ema_dev_history[0].value)
+    assert len(dev_history) == 1
 
 
 def test_run_real_baseline_checkpoints_and_resumes_mid_epoch(tmp_path):
