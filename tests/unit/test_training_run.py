@@ -25,7 +25,9 @@ from spectratwin.training.config import RealBaselineTrainConfig, RealSmokeTrainC
 from spectratwin.training.dataset import FLIR_ANNOTATION_FILENAME
 from spectratwin.training.run import (
     BASELINE_CHECKPOINT_SCHEMA_VERSION,
+    _create_ema_state,
     _move_batch_to_device,
+    _update_ema_state,
     run_real_baseline_training,
     run_real_smoke_training,
 )
@@ -55,6 +57,41 @@ def test_move_batch_to_device_recurses_into_processor_labels():
     assert moved["labels"][0]["metadata"] is metadata
     assert moved["nested_tuple"][0].device.type == "meta"
     assert moved["nested_tuple"][1] == "unchanged"
+
+
+def test_ema_state_ramps_up_then_tracks_a_moving_model():
+    model = torch.nn.Linear(2, 2, bias=False)
+    with torch.no_grad():
+        model.weight.fill_(1.0)
+    ema_state = _create_ema_state(model)
+    assert torch.equal(ema_state["weight"], model.weight)
+
+    with torch.no_grad():
+        model.weight.fill_(2.0)
+    # step=1, warmup_steps=1000: decay is near 0, so EMA should jump close to
+    # the new model weights rather than barely moving.
+    _update_ema_state(ema_state, model, step=1, warmup_steps=1000)
+    assert torch.allclose(ema_state["weight"], model.weight, atol=1e-2)
+
+    with torch.no_grad():
+        model.weight.fill_(0.0)
+    # step >> warmup_steps: decay saturates near EMA_DECAY, so one update
+    # should barely move the average away from where it already was.
+    before = ema_state["weight"].clone()
+    _update_ema_state(ema_state, model, step=100_000, warmup_steps=1000)
+    assert torch.allclose(ema_state["weight"], before, atol=1e-2)
+    assert not torch.equal(ema_state["weight"], model.weight)
+
+
+def test_ema_state_copies_non_floating_buffers_verbatim():
+    model = torch.nn.BatchNorm1d(2)
+    ema_state = _create_ema_state(model)
+    tracked = model.num_batches_tracked
+    assert tracked is not None
+    tracked.fill_(7)
+    _update_ema_state(ema_state, model, step=5, warmup_steps=1000)
+
+    assert ema_state["num_batches_tracked"].item() == 7
 
 
 def _write_flir_root(root: Path, n_images: int) -> list[FlirSampleRecord]:
@@ -359,6 +396,9 @@ def test_run_real_baseline_persists_and_resumes_complete_dataset(tmp_path):
     assert bundle["schema_version"] == BASELINE_CHECKPOINT_SCHEMA_VERSION
     assert bundle["target_epochs"] == 2
     assert bundle["completed_epochs"] == 2
+    assert bundle["ema_state_dict"].keys() == bundle["model_state_dict"].keys()
+    for name, tensor in bundle["ema_state_dict"].items():
+        assert tensor.shape == bundle["model_state_dict"][name].shape
 
 
 def test_run_real_baseline_checkpoints_and_resumes_mid_epoch(tmp_path):

@@ -7,7 +7,11 @@ from PIL import Image
 from spectratwin.real_data.adapter import scan_flir_dataset
 from spectratwin.real_data.manifest import build_manifest
 from spectratwin.real_data.records import FlirSampleRecord
-from spectratwin.training.dataset import FLIR_ANNOTATION_FILENAME, load_training_dataset
+from spectratwin.training.dataset import (
+    FLIR_ANNOTATION_FILENAME,
+    load_training_dataset,
+    wrap_with_train_augmentation,
+)
 
 
 def _write_flir_root(root: Path, images: list[dict], annotations: list[dict]) -> None:
@@ -137,3 +141,53 @@ def test_dataset_getitem_rechecks_path_confinement_after_scan(tmp_path):
 
     with pytest.raises(ValueError, match="dataset root"):
         dataset[0]
+
+
+def test_augmented_dataset_is_deterministic_per_epoch_seed(tmp_path):
+    root = _tiny_root(tmp_path)
+    manifest = build_manifest("real_train", _scan_records(root), master_seed=0)
+    dataset = load_training_dataset(manifest, root)
+
+    augmented_a = wrap_with_train_augmentation(dataset, epoch_seed=123)
+    augmented_b = wrap_with_train_augmentation(dataset, epoch_seed=123)
+
+    image_a, target_a = augmented_a[0]
+    image_b, target_b = augmented_b[0]
+    assert image_a.tobytes() == image_b.tobytes()
+    assert target_a == target_b
+
+
+def test_augmented_dataset_varies_across_epoch_seeds(tmp_path):
+    # A jitter-only change is invisible on a solid-black fixture image (any
+    # brightness/contrast scale of 0 is still 0), so this needs real pixel
+    # variance to detect the jitter at all.
+    images = [{"id": 1, "file_name": "a.jpg", "width": 100, "height": 100}]
+    annotations = [{"id": 1, "image_id": 1, "category_id": 1, "bbox": [10, 10, 20, 20]}]
+    _write_flir_root(tmp_path, images, annotations)
+    Image.new("RGB", (100, 100), color=(120, 130, 140)).save(tmp_path / "a.jpg")
+    manifest = build_manifest("real_train", _scan_records(tmp_path), master_seed=0)
+    dataset = load_training_dataset(manifest, tmp_path)
+
+    outcomes = {
+        wrap_with_train_augmentation(dataset, epoch_seed=seed)[0][0].tobytes() for seed in range(10)
+    }
+
+    assert len(outcomes) > 1
+
+
+def test_augmented_dataset_flip_mirrors_bounding_box(tmp_path):
+    root = _tiny_root(tmp_path)
+    manifest = build_manifest("real_train", _scan_records(root), master_seed=0)
+    dataset = load_training_dataset(manifest, root)
+    base_image, base_target = dataset[0]
+    width, _ = base_image.size
+    original_x, _y, original_w, _h = base_target["annotations"][0]["bbox"]
+
+    flipped = next(
+        target
+        for seed in range(50)
+        for _image, target in [wrap_with_train_augmentation(dataset, epoch_seed=seed)[0]]
+        if target["annotations"][0]["bbox"][0] != original_x
+    )
+
+    assert flipped["annotations"][0]["bbox"][0] == width - original_x - original_w
