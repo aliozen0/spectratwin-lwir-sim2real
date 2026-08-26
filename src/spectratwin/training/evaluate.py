@@ -10,6 +10,7 @@ nothing here writes back to the benchmark manifest or FLIR source root.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -17,10 +18,12 @@ import torch
 from pydantic import BaseModel, ConfigDict
 from torchvision.ops import box_iou
 
-from spectratwin.real_data.manifest import DatasetManifest
+from spectratwin.real_data.manifest import DatasetManifest, read_manifest
 from spectratwin.real_data.split import REAL_BENCHMARK
-from spectratwin.training.dataset import FlirDetectionDataset
+from spectratwin.training.dataset import FlirDetectionDataset, load_training_dataset
 from spectratwin.training.metrics import DetectionMetrics, accumulate_detection_metrics
+from spectratwin.training.model import ID2LABEL, build_pretrained_model
+from spectratwin.training.run import load_real_baseline_checkpoint
 
 #: COCO matching convention this gallery follows for both false positives
 #: and false negatives.
@@ -59,6 +62,7 @@ class EvaluationReport(BaseModel):
     git_sha: str | None
     checkpoint_id: str
     checkpoint_revision: str
+    config_identity: str
     benchmark_manifest_role: str
     benchmark_manifest_fingerprint: str
     seed: int | None
@@ -170,6 +174,7 @@ def evaluate_frozen_benchmark(
     run_id: str,
     checkpoint_id: str,
     checkpoint_revision: str,
+    config_identity: str,
     expected_id2label: dict[int, str],
     git_sha: str | None = None,
     seed: int | None = None,
@@ -260,6 +265,7 @@ def evaluate_frozen_benchmark(
         git_sha=git_sha,
         checkpoint_id=checkpoint_id,
         checkpoint_revision=checkpoint_revision,
+        config_identity=config_identity,
         benchmark_manifest_role=manifest.role,
         benchmark_manifest_fingerprint=manifest.fingerprint,
         seed=seed,
@@ -271,3 +277,52 @@ def evaluate_frozen_benchmark(
     )
     (eval_dir / "report.json").write_text(report.model_dump_json(indent=2))
     return report
+
+
+def evaluate_real_baseline_checkpoint(
+    *,
+    checkpoint_path: Path,
+    benchmark_manifest_path: Path,
+    flir_benchmark_root: Path,
+    device: torch.device,
+    artifact_root: Path,
+    expected_run_id: str,
+    score_threshold: float = 0.0,
+    model_factory: Callable[[str, str], tuple[Any, Any]] = build_pretrained_model,
+) -> EvaluationReport:
+    """Load one completed R100 checkpoint and evaluate the frozen benchmark once."""
+    model, processor, checkpoint = load_real_baseline_checkpoint(
+        checkpoint_path, device=device, model_factory=model_factory
+    )
+    if checkpoint.run_id != expected_run_id:
+        raise ValueError(
+            "baseline checkpoint run_id mismatch: "
+            f"expected {expected_run_id!r}, got {checkpoint.run_id!r}"
+        )
+    if checkpoint.completed_epochs != checkpoint.target_epochs:
+        raise ValueError(
+            "refusing frozen-benchmark evaluation for an incomplete baseline checkpoint"
+        )
+
+    manifest = read_manifest(benchmark_manifest_path)
+    if manifest.role != REAL_BENCHMARK:
+        raise ValueError(
+            f"real baseline evaluation requires role={REAL_BENCHMARK!r}, got {manifest.role!r}"
+        )
+    dataset = load_training_dataset(manifest, flir_benchmark_root)
+    return evaluate_frozen_benchmark(
+        model=model,
+        processor=processor,
+        manifest=manifest,
+        dataset=dataset,
+        device=device,
+        artifact_root=artifact_root,
+        run_id=checkpoint.run_id,
+        checkpoint_id=checkpoint.checkpoint_id,
+        checkpoint_revision=checkpoint.checkpoint_revision,
+        config_identity=checkpoint.config_identity,
+        expected_id2label=ID2LABEL,
+        git_sha=checkpoint.git_sha_at_save,
+        seed=checkpoint.seed,
+        score_threshold=score_threshold,
+    )

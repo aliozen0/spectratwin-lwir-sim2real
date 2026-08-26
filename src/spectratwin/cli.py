@@ -85,6 +85,62 @@ def _cmd_train_real_smoke(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_train_real_baseline(args: argparse.Namespace) -> int:
+    from spectratwin.training.config import RealBaselineTrainConfig
+    from spectratwin.training.run import run_real_baseline_training
+
+    settings = load_settings()
+    config = RealBaselineTrainConfig(
+        train_manifest_path=Path(args.train_manifest),
+        dev_manifest_path=Path(args.dev_manifest),
+        flir_train_root=Path(args.flir_train_root),
+        flir_dev_root=Path(args.flir_dev_root),
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        learning_rate=args.learning_rate,
+        backbone_learning_rate=args.backbone_learning_rate,
+        weight_decay=args.weight_decay,
+        warmup_steps=args.warmup_steps,
+        gradient_clip_norm=args.gradient_clip_norm,
+        checkpoint_interval_epochs=args.checkpoint_interval_epochs,
+        precision=args.precision,
+        device=args.device,
+        num_workers=args.num_workers,
+        run_id=args.run_id,
+        resume_from_checkpoint=(
+            Path(args.resume_from_checkpoint) if args.resume_from_checkpoint else None
+        ),
+        persistent_checkpoint_dir=(
+            Path(args.persistent_checkpoint_dir) if args.persistent_checkpoint_dir else None
+        ),
+        max_epochs_this_invocation=args.max_epochs_this_invocation,
+    )
+    result = run_real_baseline_training(config, settings)
+    print(result.model_dump_json(indent=2))
+    return 0
+
+
+def _cmd_evaluate_real_benchmark(args: argparse.Namespace) -> int:
+    import torch
+
+    from spectratwin.training.evaluate import evaluate_real_baseline_checkpoint
+
+    settings = load_settings()
+    if settings.artifact_root is None:
+        raise ValueError("SPECTRATWIN_ARTIFACT_ROOT is required for evaluation")
+    report = evaluate_real_baseline_checkpoint(
+        checkpoint_path=Path(args.checkpoint),
+        benchmark_manifest_path=Path(args.benchmark_manifest),
+        flir_benchmark_root=Path(args.flir_benchmark_root),
+        device=torch.device(args.device),
+        artifact_root=settings.artifact_root,
+        expected_run_id=args.run_id,
+        score_threshold=args.score_threshold,
+    )
+    print(report.model_dump_json(indent=2))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="spectratwin")
     parser.add_argument("--version", action="store_true", help="print version and exit")
@@ -144,6 +200,43 @@ def build_parser() -> argparse.ArgumentParser:
     real_smoke_parser.add_argument("--run-id")
     real_smoke_parser.add_argument("--resume-from-checkpoint")
     real_smoke_parser.set_defaults(func=_cmd_train_real_smoke)
+
+    real_baseline_parser = train_subparsers.add_parser(
+        "real-baseline", help="train the fixed R100 baseline on complete train/dev manifests"
+    )
+    real_baseline_parser.add_argument("--train-manifest", required=True)
+    real_baseline_parser.add_argument("--dev-manifest", required=True)
+    real_baseline_parser.add_argument("--flir-train-root", required=True)
+    real_baseline_parser.add_argument("--flir-dev-root", required=True)
+    real_baseline_parser.add_argument("--epochs", type=int, required=True)
+    real_baseline_parser.add_argument("--batch-size", type=int, default=16)
+    real_baseline_parser.add_argument("--learning-rate", type=float, default=1e-4)
+    real_baseline_parser.add_argument("--backbone-learning-rate", type=float, default=1e-5)
+    real_baseline_parser.add_argument("--weight-decay", type=float, default=1e-4)
+    real_baseline_parser.add_argument("--warmup-steps", type=int, default=2_000)
+    real_baseline_parser.add_argument("--gradient-clip-norm", type=float, default=0.1)
+    real_baseline_parser.add_argument("--checkpoint-interval-epochs", type=int, default=5)
+    real_baseline_parser.add_argument("--precision", choices=["fp32", "bf16"], default="fp32")
+    real_baseline_parser.add_argument("--device", default="cuda")
+    real_baseline_parser.add_argument("--num-workers", type=int, default=4)
+    real_baseline_parser.add_argument("--run-id", required=True)
+    real_baseline_parser.add_argument("--resume-from-checkpoint")
+    real_baseline_parser.add_argument("--persistent-checkpoint-dir")
+    real_baseline_parser.add_argument("--max-epochs-this-invocation", type=int)
+    real_baseline_parser.set_defaults(func=_cmd_train_real_baseline)
+
+    evaluate_parser = subparsers.add_parser("evaluate", help="evaluation utilities")
+    evaluate_subparsers = evaluate_parser.add_subparsers(dest="evaluate_command", required=True)
+    real_benchmark_parser = evaluate_subparsers.add_parser(
+        "real-benchmark", help="evaluate one completed R100 checkpoint exactly once"
+    )
+    real_benchmark_parser.add_argument("--checkpoint", required=True)
+    real_benchmark_parser.add_argument("--benchmark-manifest", required=True)
+    real_benchmark_parser.add_argument("--flir-benchmark-root", required=True)
+    real_benchmark_parser.add_argument("--run-id", required=True)
+    real_benchmark_parser.add_argument("--device", default="cuda")
+    real_benchmark_parser.add_argument("--score-threshold", type=float, default=0.0)
+    real_benchmark_parser.set_defaults(func=_cmd_evaluate_real_benchmark)
 
     return parser
 

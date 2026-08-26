@@ -10,7 +10,11 @@ from transformers import RTDetrImageProcessor, RTDetrV2Config, RTDetrV2ForObject
 from spectratwin.real_data.manifest import build_manifest
 from spectratwin.real_data.split import REAL_BENCHMARK, REAL_TRAIN
 from spectratwin.training.dataset import FLIR_ANNOTATION_FILENAME, load_training_dataset
-from spectratwin.training.evaluate import evaluate_frozen_benchmark
+from spectratwin.training.evaluate import (
+    evaluate_frozen_benchmark,
+    evaluate_real_baseline_checkpoint,
+)
+from spectratwin.training.run import BASELINE_CHECKPOINT_SCHEMA_VERSION
 
 PROJECT_ID2LABEL = {0: "person", 1: "car", 2: "bicycle"}
 
@@ -73,6 +77,7 @@ def test_evaluate_frozen_benchmark_rejects_non_benchmark_manifest(tmp_path):
             run_id="run-1",
             checkpoint_id="test",
             checkpoint_revision="test",
+            config_identity="test-config",
             expected_id2label=PROJECT_ID2LABEL,
         )
 
@@ -92,6 +97,7 @@ def test_evaluate_frozen_benchmark_rejects_taxonomy_mismatch(tmp_path):
             run_id="run-1",
             checkpoint_id="test",
             checkpoint_revision="test",
+            config_identity="test-config",
             expected_id2label=PROJECT_ID2LABEL,
         )
 
@@ -111,6 +117,7 @@ def test_evaluate_frozen_benchmark_persists_report_and_predictions(tmp_path):
         run_id="run-1",
         checkpoint_id="test-checkpoint",
         checkpoint_revision="rev-1",
+        config_identity="test-config",
         expected_id2label=PROJECT_ID2LABEL,
         seed=42,
     )
@@ -137,7 +144,64 @@ def test_evaluate_frozen_benchmark_persists_report_and_predictions(tmp_path):
         run_id="run-2",
         checkpoint_id="test-checkpoint",
         checkpoint_revision="rev-1",
+        config_identity="test-config",
         expected_id2label=PROJECT_ID2LABEL,
         seed=42,
     )
     assert report_again.metrics == report.metrics
+
+
+def test_evaluate_real_baseline_checkpoint_uses_persisted_identity(tmp_path):
+    manifest, _dataset = _build_benchmark_dataset(tmp_path, 1)
+    manifest_path = tmp_path / "real_benchmark.json"
+    manifest_path.write_text(manifest.model_dump_json(indent=2))
+    benchmark_root = tmp_path / "benchmark_root"
+    model, _processor = _tiny_model(PROJECT_ID2LABEL)
+    checkpoint_path = tmp_path / "model.pt"
+    bundle = {
+        "schema_version": BASELINE_CHECKPOINT_SCHEMA_VERSION,
+        "run_id": "r100-test",
+        "completed_epochs": 1,
+        "completed_steps": 1,
+        "target_epochs": 1,
+        "config_identity": "config-sha",
+        "seed": 42,
+        "train_dataset_fingerprint": "1" * 64,
+        "dev_dataset_fingerprint": "2" * 64,
+        "git_sha_at_save": "3" * 40,
+        "checkpoint_id": "test-checkpoint",
+        "checkpoint_revision": "test-revision",
+        "precision": "fp32",
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": {},
+    }
+    torch.save(bundle, checkpoint_path)
+
+    report = evaluate_real_baseline_checkpoint(
+        checkpoint_path=checkpoint_path,
+        benchmark_manifest_path=manifest_path,
+        flir_benchmark_root=benchmark_root,
+        device=torch.device("cpu"),
+        artifact_root=tmp_path / "eval-artifacts",
+        expected_run_id="r100-test",
+        model_factory=lambda _checkpoint_id, _checkpoint_revision: _tiny_model(PROJECT_ID2LABEL),
+    )
+
+    assert report.run_id == "r100-test"
+    assert report.config_identity == "config-sha"
+    assert report.git_sha == "3" * 40
+
+    bundle["completed_epochs"] = 0
+    torch.save(bundle, checkpoint_path)
+    with pytest.raises(ValueError, match="incomplete"):
+        evaluate_real_baseline_checkpoint(
+            checkpoint_path=checkpoint_path,
+            benchmark_manifest_path=manifest_path,
+            flir_benchmark_root=benchmark_root,
+            device=torch.device("cpu"),
+            artifact_root=tmp_path / "eval-artifacts",
+            expected_run_id="r100-test",
+            model_factory=lambda _checkpoint_id, _checkpoint_revision: _tiny_model(
+                PROJECT_ID2LABEL
+            ),
+        )
