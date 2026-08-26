@@ -36,7 +36,14 @@ _LOSS_CURVE_METRICS: tuple[str, ...] = ("train_loss", "epoch_train_loss", "dev_l
 _BACKGROUND_LABEL = "background"
 
 
-def _find_run(tracking_uri: str, experiment_name: str, run_id: str):
+def _find_runs(tracking_uri: str, experiment_name: str, run_id: str):
+    """Return every MLflow run tagged with this logical ``run_id``.
+
+    ``train real-baseline`` opens a fresh physical MLflow run on each
+    invocation (including a resume after a crash), all sharing the same
+    ``mlflow.runName`` tag. A logical run's full history can therefore be
+    split across several physical runs; callers must merge them.
+    """
     client = MlflowClient(tracking_uri=tracking_uri)
     experiment = client.get_experiment_by_name(experiment_name)
     if experiment is None:
@@ -46,7 +53,7 @@ def _find_run(tracking_uri: str, experiment_name: str, run_id: str):
     )
     if not runs:
         raise ValueError(f"no MLflow run named {run_id!r} in experiment {experiment_name!r}")
-    return client, runs[0]
+    return client, sorted(runs, key=lambda r: r.info.start_time)
 
 
 def build_training_loss_report(
@@ -55,24 +62,39 @@ def build_training_loss_report(
     run_id: str,
     output_dir: Path,
 ) -> dict[str, Path]:
-    """Render a loss-curve plot and per-metric CSV tables for one MLflow run.
+    """Render a loss-curve plot and per-metric CSV tables for one logical run.
 
-    Writes ``loss_curve.png``, one ``<metric>.csv`` per logged metric and a
-    ``summary.json`` (run params/final metrics) under ``output_dir``.
+    Merges every physical MLflow run sharing this ``run_id`` (a crash and
+    resume opens a new one each time) into one step-ordered history. Writes
+    ``loss_curve.png``, one ``<metric>.csv`` per logged metric and a
+    ``summary.json`` (params/final metrics from the most recently started
+    physical run) under ``output_dir``.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
-    client, run = _find_run(tracking_uri, experiment_name, run_id)
+    client, runs = _find_runs(tracking_uri, experiment_name, run_id)
 
-    metric_names = sorted(run.data.metrics.keys())
-    histories = {name: client.get_metric_history(run.info.run_id, name) for name in metric_names}
+    metric_names: set[str] = set()
+    for run in runs:
+        metric_names.update(run.data.metrics.keys())
 
+    histories: dict[str, list] = {name: [] for name in sorted(metric_names)}
+    for run in runs:
+        for name in histories:
+            histories[name].extend(client.get_metric_history(run.info.run_id, name))
+    for name, points in histories.items():
+        # Keep the latest-logged value for a step number two physical runs
+        # both touched (e.g. a resume re-logging its own starting step).
+        by_step = {point.step: point for point in sorted(points, key=lambda p: p.timestamp)}
+        histories[name] = [by_step[step] for step in sorted(by_step)]
+
+    latest_run = runs[-1]
     written: dict[str, Path] = {}
     for name, points in histories.items():
         csv_path = output_dir / f"{name}.csv"
         with csv_path.open("w", newline="") as stream:
             writer = csv.writer(stream)
             writer.writerow(["step", "value", "timestamp_ms"])
-            for point in sorted(points, key=lambda p: p.step):
+            for point in points:
                 writer.writerow([point.step, point.value, point.timestamp])
         written[f"metric_csv:{name}"] = csv_path
 
@@ -104,10 +126,11 @@ def build_training_loss_report(
 
     summary = {
         "run_id": run_id,
-        "mlflow_run_id": run.info.run_id,
+        "mlflow_run_id": latest_run.info.run_id,
+        "mlflow_run_ids": [run.info.run_id for run in runs],
         "experiment_name": experiment_name,
-        "params": dict(run.data.params),
-        "final_metrics": dict(run.data.metrics),
+        "params": dict(latest_run.data.params),
+        "final_metrics": dict(latest_run.data.metrics),
         "note": (
             "Execution diagnostics read back from a training run's own MLflow "
             "log. Not a benchmark evaluation; real_benchmark is never read here."

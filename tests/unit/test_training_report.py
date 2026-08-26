@@ -40,6 +40,38 @@ def test_build_training_loss_report_writes_curve_tables_and_summary(tmp_path: Pa
     assert "real_benchmark" not in summary["note"] or "never" in summary["note"]
 
 
+def test_build_training_loss_report_merges_a_crash_and_resume(tmp_path: Path) -> None:
+    """A resumed baseline run opens a second physical MLflow run under the
+    same run_name; the report must stitch both histories into one curve
+    instead of only showing the resumed tail."""
+    tracking_uri = f"file:{tmp_path / 'mlruns'}"
+    mlflow.set_tracking_uri(tracking_uri)
+    mlflow.set_experiment("test-experiment")
+    with mlflow.start_run(run_name="crash-resume-run"):
+        for step, value in enumerate([1.0, 0.9, 0.8]):
+            mlflow.log_metric("train_loss", value, step=step)
+    with mlflow.start_run(run_name="crash-resume-run"):
+        for step, value in [(3, 0.7), (4, 0.6)]:
+            mlflow.log_metric("train_loss", value, step=step)
+        mlflow.log_metric("dev_loss", 0.65, step=1)
+
+    written = build_training_loss_report(
+        tracking_uri=tracking_uri,
+        experiment_name="test-experiment",
+        run_id="crash-resume-run",
+        output_dir=tmp_path / "report",
+    )
+
+    rows = written["metric_csv:train_loss"].read_text().strip().splitlines()[1:]
+    steps = [int(row.split(",")[0]) for row in rows]
+    values = [float(row.split(",")[1]) for row in rows]
+    assert steps == [0, 1, 2, 3, 4]
+    assert values == [1.0, 0.9, 0.8, 0.7, 0.6]
+
+    summary = json.loads(written["summary_json"].read_text())
+    assert len(summary["mlflow_run_ids"]) == 2
+
+
 def _prediction_record(source_id, pred_boxes, pred_labels, pred_scores, gt_boxes, gt_labels):
     return {
         "source_id": source_id,
