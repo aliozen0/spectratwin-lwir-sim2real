@@ -632,6 +632,38 @@ def _load_baseline_resume_checkpoint(
     return completed_epochs, completed_steps, partial_epoch_steps, ema_state
 
 
+def _evaluate_dev_loss(
+    model: Any,
+    dev_dataset: Any,
+    *,
+    processor: Any,
+    config: RealBaselineTrainConfig,
+    seed: int,
+    device: torch.device,
+    pin_memory: bool,
+) -> float:
+    dev_loader = _baseline_data_loader(
+        dev_dataset,
+        processor=processor,
+        batch_size=config.batch_size,
+        num_workers=config.num_workers,
+        shuffle=False,
+        seed=seed,
+        pin_memory=pin_memory,
+    )
+    model.eval()
+    dev_losses: list[float] = []
+    with torch.no_grad():
+        for batch in dev_loader:
+            batch = _move_batch_to_device(batch, device)
+            with torch.autocast(
+                device_type=device.type, dtype=torch.bfloat16, enabled=config.precision == "bf16"
+            ):
+                outputs = model(**batch)
+            dev_losses.append(float(outputs.loss.detach().cpu()))
+    return sum(dev_losses) / len(dev_losses)
+
+
 def _baseline_data_loader(
     dataset: Any,
     *,
@@ -854,30 +886,41 @@ def run_real_baseline_training(
                                 "persisted mid-epoch checkpoint is missing its completion marker"
                             )
 
-            dev_loader = _baseline_data_loader(
+            dev_seed = derive_subseed(seed, "dev", str(epoch_index))
+            final_dev_loss = _evaluate_dev_loss(
+                model,
                 dev_dataset,
                 processor=processor,
-                batch_size=config.batch_size,
-                num_workers=config.num_workers,
-                shuffle=False,
-                seed=derive_subseed(seed, "dev", str(epoch_index)),
+                config=config,
+                seed=dev_seed,
+                device=device,
                 pin_memory=pin_memory,
             )
-            model.eval()
-            dev_losses: list[float] = []
-            with torch.no_grad():
-                for batch in dev_loader:
-                    batch = _move_batch_to_device(batch, device)
-                    with torch.autocast(
-                        device_type=device.type,
-                        dtype=torch.bfloat16,
-                        enabled=config.precision == "bf16",
-                    ):
-                        outputs = model(**batch)
-                    dev_losses.append(float(outputs.loss.detach().cpu()))
-            final_dev_loss = sum(dev_losses) / len(dev_losses)
             if not math.isfinite(final_dev_loss):
                 raise RuntimeError("non-finite development loss; refusing to write a checkpoint")
+
+            # EMA weights are what a later evaluation may ultimately use
+            # (ADR-013 leaves that choice to SPEC-011); measuring their dev
+            # loss every epoch here means we are not flying blind on whether
+            # EMA is actually converging, rather than finding out only after
+            # the full 72-epoch run completes.
+            raw_state_for_restore = _create_ema_state(model)
+            model.load_state_dict(ema_state)
+            final_ema_dev_loss = _evaluate_dev_loss(
+                model,
+                dev_dataset,
+                processor=processor,
+                config=config,
+                seed=dev_seed,
+                device=device,
+                pin_memory=pin_memory,
+            )
+            model.load_state_dict(raw_state_for_restore)
+            if not math.isfinite(final_ema_dev_loss):
+                raise RuntimeError(
+                    "non-finite EMA development loss; refusing to write a checkpoint"
+                )
+
             completed_epochs = epoch_index + 1
             mlflow.log_metric(
                 "epoch_train_loss",
@@ -885,6 +928,7 @@ def run_real_baseline_training(
                 step=completed_epochs,
             )
             mlflow.log_metric("dev_loss", final_dev_loss, step=completed_epochs)
+            mlflow.log_metric("ema_dev_loss", final_ema_dev_loss, step=completed_epochs)
 
             _save_checkpoint_atomically(
                 checkpoint_path,
