@@ -104,6 +104,7 @@ def _cmd_train_real_baseline(args: argparse.Namespace) -> int:
         warmup_steps=args.warmup_steps,
         gradient_clip_norm=args.gradient_clip_norm,
         checkpoint_interval_epochs=args.checkpoint_interval_epochs,
+        checkpoint_interval_steps=args.checkpoint_interval_steps,
         precision=args.precision,
         device=args.device,
         num_workers=args.num_workers,
@@ -243,6 +244,7 @@ def build_parser() -> argparse.ArgumentParser:
     real_baseline_parser.add_argument("--warmup-steps", type=int, default=2_000)
     real_baseline_parser.add_argument("--gradient-clip-norm", type=float, default=0.1)
     real_baseline_parser.add_argument("--checkpoint-interval-epochs", type=int, default=5)
+    real_baseline_parser.add_argument("--checkpoint-interval-steps", type=int, default=None)
     real_baseline_parser.add_argument("--precision", choices=["fp32", "bf16"], default="fp32")
     real_baseline_parser.add_argument("--device", default="cuda")
     real_baseline_parser.add_argument("--num-workers", type=int, default=4)
