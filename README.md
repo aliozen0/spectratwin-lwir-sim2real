@@ -8,9 +8,11 @@ the amount of labeled real thermal imagery needed for urban object detection.
 The project fixes the detector family and treats data generation, thermal
 modeling and sensor simulation as the research variables.
 
-> Status: active research and engineering. The real-data ingestion and training
-> smoke paths are implemented; the procedural scene and synthetic LWIR pipeline
-> remain under development. No benchmark-quality result is claimed yet.
+> Status: active research and engineering. Real-data ingestion, training smoke,
+> deterministic scene/camera sampling, reference LWIR radiometry, the Cycles
+> thermal path, core sensor effects and ground-truth contracts are implemented.
+> Production dataset orchestration and meaningful benchmark experiments remain
+> open. No benchmark-quality or sim-to-real result is claimed yet.
 
 ## What is implemented
 
@@ -20,6 +22,14 @@ modeling and sensor simulation as the research variables.
 - dataset EDA and sequence-aware split validation,
 - a minimal RT-DETRv2 real-data train/eval smoke loop,
 - resumable model and optimizer checkpoints with identity validation,
+- deterministic urban-intersection scene descriptions and collision-aware
+  placement for people, cars and bicycles,
+- camera intrinsics, bounded poses and explicit world/camera transforms,
+- NumPy reference LWIR radiometry and bounded thermal-material priors,
+- a plain-`bpy` Cycles thermal render path executed under BlenderProc,
+- independently testable blur, noise, quantization and AGC stages,
+- visible instance/semantic masks, optical-axis depth, COCO RLE/bboxes,
+  deterministic IDs, strict schema validation and diagnostic overlays,
 - checksum-verified, atomic staging and persistence helpers,
 - unit and offline smoke tests for the implemented paths.
 
@@ -30,7 +40,21 @@ modeling and sensor simulation as the research variables.
 - Modalities: RGB and synthetic LWIR
 - Detector: RT-DETRv2 through Hugging Face Transformers
 - Real reference: Teledyne FLIR ADAS thermal dataset
-- Planned outputs: COCO boxes, masks, depth and reproducibility metadata
+- Implemented synthetic contracts: thermal radiance, instance/semantic masks,
+  optical-axis depth, COCO boxes/RLE and reproducibility metadata
+
+## Current limitations
+
+- Scene rendering uses deterministic placeholder primitives rather than a
+  production registry of reviewed meshes and textures.
+- RGB dataset rendering, geometric distortion and multi-region thermal objects
+  remain incomplete.
+- The ground-truth contract passed a bounded 20-frame pilot; the resumable,
+  sharded generator and required 500-frame pilot are not implemented yet.
+- The real-only reference baseline, synthetic-only baseline, low-real-data
+  experiments and ablations have not run.
+- Thermal outputs are physically motivated configuration priors, not calibrated
+  equivalence to a named FLIR camera.
 
 The LWIR model is intended to be physically motivated, not a calibrated clone
 of any commercial camera. Real benchmark data must not be used for iterative
