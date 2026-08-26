@@ -26,7 +26,9 @@ from spectratwin.training.config import RealBaselineTrainConfig, RealSmokeTrainC
 from spectratwin.training.dataset import FLIR_ANNOTATION_FILENAME
 from spectratwin.training.run import (
     BASELINE_CHECKPOINT_SCHEMA_VERSION,
+    MULTISCALE_SIZES,
     _create_ema_state,
+    _make_collate_fn,
     _move_batch_to_device,
     _update_ema_state,
     run_real_baseline_training,
@@ -93,6 +95,33 @@ def test_ema_state_copies_non_floating_buffers_verbatim():
     _update_ema_state(ema_state, model, step=5, warmup_steps=1000)
 
     assert ema_state["num_batches_tracked"].item() == 7
+
+
+def test_multiscale_collate_varies_size_and_is_deterministic_per_batch():
+    from transformers import RTDetrImageProcessor
+
+    processor = RTDetrImageProcessor(size={"height": 640, "width": 640})
+    image = Image.new("RGB", (100, 100))
+    batch = [
+        (image, {"image_id": 1, "annotations": []}),
+        (image, {"image_id": 2, "annotations": []}),
+    ]
+
+    collate_no_multiscale = _make_collate_fn(processor)
+    fixed = collate_no_multiscale(batch)
+    assert fixed["pixel_values"].shape[-1] == 640
+
+    sizes = set()
+    for seed in range(30):
+        collate = _make_collate_fn(processor, multiscale_seed=seed)
+        out = collate(batch)
+        sizes.add(int(out["pixel_values"].shape[-1]))
+    assert sizes <= set(MULTISCALE_SIZES)
+    assert len(sizes) > 1
+
+    collate_a = _make_collate_fn(processor, multiscale_seed=7)
+    collate_b = _make_collate_fn(processor, multiscale_seed=7)
+    assert collate_a(batch)["pixel_values"].shape == collate_b(batch)["pixel_values"].shape
 
 
 def _write_flir_root(root: Path, n_images: int) -> list[FlirSampleRecord]:
