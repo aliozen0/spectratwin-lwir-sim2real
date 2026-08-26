@@ -12,9 +12,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from PIL import Image
+from PIL import Image, ImageEnhance
 from torch.utils.data import Dataset
 
+from spectratwin.randomness.seed import new_generator
 from spectratwin.real_data.adapter import resolve_source_path, scan_flir_dataset
 from spectratwin.real_data.manifest import DatasetManifest, build_manifest
 from spectratwin.real_data.records import FlirSampleRecord
@@ -107,3 +108,47 @@ def load_training_dataset(
     """Build the training-facing dataset for one frozen manifest + source root."""
     records = load_training_records(manifest, flir_source_root)
     return FlirDetectionDataset(records, flir_source_root)
+
+
+class AugmentedFlirDataset(Dataset[tuple[Image.Image, dict[str, Any]]]):
+    """Train-only wrapper: horizontal flip (SPEC-010 real-only baseline).
+
+    Adds brightness/contrast jitter. No hue/saturation: thermal frames are
+    single-channel data replicated into an RGB triplet, so those channels
+    carry nothing physical to perturb. Randomness is derived per (epoch_seed,
+    index), never from hidden global state, so it stays reproducible across
+    epochs and safe under a multi-worker ``DataLoader``.
+    """
+
+    def __init__(self, base: Dataset[tuple[Image.Image, dict[str, Any]]], epoch_seed: int) -> None:
+        self._base = base
+        self._epoch_seed = epoch_seed
+
+    def __len__(self) -> int:
+        return len(self._base)  # type: ignore[arg-type]
+
+    def __getitem__(self, index: int) -> tuple[Image.Image, dict[str, Any]]:
+        image, target = self._base[index]
+        generator = new_generator(self._epoch_seed, "augment", str(index))
+
+        if generator.random() < 0.5:
+            width, _height = image.size
+            image = image.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+            flipped_annotations = []
+            for annotation in target["annotations"]:
+                x, y, w, h = annotation["bbox"]
+                flipped_annotations.append({**annotation, "bbox": [width - x - w, y, w, h]})
+            target = {**target, "annotations": flipped_annotations}
+
+        brightness = float(generator.uniform(0.8, 1.2))
+        contrast = float(generator.uniform(0.8, 1.2))
+        image = ImageEnhance.Brightness(image).enhance(brightness)
+        image = ImageEnhance.Contrast(image).enhance(contrast)
+        return image, target
+
+
+def wrap_with_train_augmentation(
+    base: Dataset[tuple[Image.Image, dict[str, Any]]], epoch_seed: int
+) -> AugmentedFlirDataset:
+    """Wrap a training dataset with SPEC-010's train-only augmentation for one epoch."""
+    return AugmentedFlirDataset(base, epoch_seed)

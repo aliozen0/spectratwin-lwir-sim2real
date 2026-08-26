@@ -29,13 +29,18 @@ from spectratwin.randomness.seed import derive_subseed
 from spectratwin.real_data.manifest import DatasetManifest, read_manifest
 from spectratwin.remote.staging import persist_file
 from spectratwin.training.config import RealBaselineTrainConfig, RealSmokeTrainConfig
-from spectratwin.training.dataset import load_training_dataset
+from spectratwin.training.dataset import load_training_dataset, wrap_with_train_augmentation
 from spectratwin.training.hardware import collect_training_hardware_report
 from spectratwin.training.model import build_pretrained_model
 
 ModelFactory = Callable[[str, str], tuple[Any, Any]]
 CHECKPOINT_SCHEMA_VERSION = "spectratwin-training-checkpoint-v1"
 BASELINE_CHECKPOINT_SCHEMA_VERSION = "spectratwin-real-baseline-checkpoint-v1"
+
+#: SPEC-010 real-only baseline: source-backed configuration prior from the
+#: cited RT-DETR/RT-DETRv2 recipe's ``ema: {decay: 0.9999}``. Fixed training-
+#: loop behavior, not a per-run tunable, so it is a constant, not a config field.
+EMA_DECAY = 0.9999
 
 
 class RealSmokeTrainResult(BaseModel):
@@ -477,6 +482,28 @@ def _apply_linear_warmup(
         group["lr"] = initial_lr * scale
 
 
+def _create_ema_state(model: Any) -> dict[str, torch.Tensor]:
+    return {name: tensor.detach().clone() for name, tensor in model.state_dict().items()}
+
+
+def _update_ema_state(
+    ema_state: dict[str, torch.Tensor], model: Any, *, step: int, warmup_steps: int
+) -> None:
+    """Ramp EMA decay from 0 like the cited recipe's ``ema.warmups``, so noisy
+    early-training updates do not dominate the average (a fresh model's EMA
+    starting at full decay would barely move for thousands of steps)."""
+    tau = max(warmup_steps, 1)
+    decay = EMA_DECAY * (1.0 - math.exp(-step / tau))
+    model_state = model.state_dict()
+    with torch.no_grad():
+        for name, averaged in ema_state.items():
+            current = model_state[name]
+            if averaged.dtype.is_floating_point:
+                averaged.mul_(decay).add_(current.detach(), alpha=1.0 - decay)
+            else:
+                averaged.copy_(current)
+
+
 def _baseline_checkpoint_bundle(
     *,
     model: Any,
@@ -490,6 +517,7 @@ def _baseline_checkpoint_bundle(
     dev_fingerprint: str,
     git_sha: str,
     config: RealBaselineTrainConfig,
+    ema_state: dict[str, torch.Tensor],
     partial_epoch_steps: int = 0,
 ) -> dict[str, Any]:
     return {
@@ -509,6 +537,7 @@ def _baseline_checkpoint_bundle(
         "precision": config.precision,
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
+        "ema_state_dict": ema_state,
     }
 
 
@@ -568,7 +597,7 @@ def _load_baseline_resume_checkpoint(
     dev_fingerprint: str,
     git_sha: str,
     device: torch.device,
-) -> tuple[int, int, int]:
+) -> tuple[int, int, int, dict[str, torch.Tensor]]:
     bundle = _read_baseline_checkpoint(path, device)
     expected = {
         "run_id": config.run_id,
@@ -597,7 +626,10 @@ def _load_baseline_resume_checkpoint(
         raise ValueError("baseline checkpoint has invalid partial_epoch_steps")
     model.load_state_dict(bundle["model_state_dict"])
     optimizer.load_state_dict(bundle["optimizer_state_dict"])
-    return completed_epochs, completed_steps, partial_epoch_steps
+    # Absent on checkpoints written before EMA existed: fall back to a fresh
+    # copy of the just-loaded raw weights rather than failing resume.
+    ema_state = bundle.get("ema_state_dict") or _create_ema_state(model)
+    return completed_epochs, completed_steps, partial_epoch_steps, ema_state
 
 
 def _baseline_data_loader(
@@ -665,8 +697,9 @@ def run_real_baseline_training(
     resumed_from_epoch = 0
     completed_steps = 0
     resumed_partial_epoch_steps = 0
+    ema_state = _create_ema_state(model)
     if config.resume_from_checkpoint is not None:
-        resumed_from_epoch, completed_steps, resumed_partial_epoch_steps = (
+        resumed_from_epoch, completed_steps, resumed_partial_epoch_steps, ema_state = (
             _load_baseline_resume_checkpoint(
                 config.resume_from_checkpoint,
                 model=model,
@@ -732,7 +765,7 @@ def run_real_baseline_training(
         for epoch_index in range(resumed_from_epoch, invocation_target):
             epoch_seed = derive_subseed(seed, "train-epoch", str(epoch_index))
             train_loader = _baseline_data_loader(
-                train_dataset,
+                wrap_with_train_augmentation(train_dataset, epoch_seed),
                 processor=processor,
                 batch_size=config.batch_size,
                 num_workers=config.num_workers,
@@ -767,6 +800,9 @@ def run_real_baseline_training(
                     model.parameters(), max_norm=config.gradient_clip_norm
                 )
                 optimizer.step()
+                _update_ema_state(
+                    ema_state, model, step=completed_steps, warmup_steps=config.warmup_steps
+                )
                 final_train_loss = float(loss.detach().cpu())
                 if not math.isfinite(final_train_loss):
                     raise RuntimeError("non-finite training loss; refusing to write a checkpoint")
@@ -796,6 +832,7 @@ def run_real_baseline_training(
                             dev_fingerprint=dev_manifest.fingerprint,
                             git_sha=git_sha,
                             config=config,
+                            ema_state=ema_state,
                             partial_epoch_steps=steps_this_epoch,
                         ),
                     )
@@ -863,6 +900,7 @@ def run_real_baseline_training(
                     dev_fingerprint=dev_manifest.fingerprint,
                     git_sha=git_sha,
                     config=config,
+                    ema_state=ema_state,
                 ),
             )
             should_persist = (
