@@ -81,3 +81,52 @@ def test_remote_stage_parses_required_args():
 
     assert args.sha256 == "a" * 64
     assert callable(args.func)
+
+
+def test_train_real_baseline_requires_explicit_identity_and_epochs():
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "train",
+            "real-baseline",
+            "--train-manifest",
+            "train.json",
+            "--dev-manifest",
+            "dev.json",
+            "--flir-train-root",
+            "/data/train",
+            "--flir-dev-root",
+            "/data/dev",
+            "--epochs",
+            "120",
+            "--run-id",
+            "r100-seed0",
+        ]
+    )
+
+    assert args.epochs == 120
+    assert args.batch_size == 16
+    assert args.run_id == "r100-seed0"
+    assert callable(args.func)
+
+
+def test_evaluate_real_benchmark_parses_frozen_inputs():
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "evaluate",
+            "real-benchmark",
+            "--checkpoint",
+            "model.pt",
+            "--benchmark-manifest",
+            "real_benchmark.json",
+            "--flir-benchmark-root",
+            "/data/benchmark",
+            "--run-id",
+            "r100-seed0",
+        ]
+    )
+
+    assert args.score_threshold == 0.0
+    assert args.device == "cuda"
+    assert callable(args.func)

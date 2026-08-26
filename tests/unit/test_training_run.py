@@ -21,9 +21,14 @@ from spectratwin.config.settings import ExecutionProfile, Settings
 from spectratwin.real_data.adapter import scan_flir_dataset
 from spectratwin.real_data.manifest import build_manifest, write_manifest
 from spectratwin.real_data.records import FlirSampleRecord
-from spectratwin.training.config import RealSmokeTrainConfig
+from spectratwin.training.config import RealBaselineTrainConfig, RealSmokeTrainConfig
 from spectratwin.training.dataset import FLIR_ANNOTATION_FILENAME
-from spectratwin.training.run import _move_batch_to_device, run_real_smoke_training
+from spectratwin.training.run import (
+    BASELINE_CHECKPOINT_SCHEMA_VERSION,
+    _move_batch_to_device,
+    run_real_baseline_training,
+    run_real_smoke_training,
+)
 
 
 def test_move_batch_to_device_recurses_into_processor_labels():
@@ -277,3 +282,80 @@ def test_run_id_rejects_path_traversal():
             flir_dev_root=Path("dev"),
             run_id="../outside",
         )
+
+
+def test_run_real_baseline_persists_and_resumes_complete_dataset(tmp_path):
+    train_root = tmp_path / "train_root"
+    dev_root = tmp_path / "dev_root"
+    train_root.mkdir()
+    dev_root.mkdir()
+    train_records = _write_flir_root(train_root, 2)
+    dev_records = _write_flir_root(dev_root, 1)
+    train_manifest = build_manifest("real_train", train_records, master_seed=0)
+    dev_manifest = build_manifest("real_dev", dev_records, master_seed=0)
+    train_manifest_path = tmp_path / "real_train.json"
+    dev_manifest_path = tmp_path / "real_dev.json"
+    write_manifest(train_manifest, train_manifest_path)
+    write_manifest(dev_manifest, dev_manifest_path)
+
+    first_settings = Settings(
+        execution_profile=ExecutionProfile.WSL,
+        master_seed=0,
+        data_root=tmp_path,
+        cache_root=tmp_path,
+        artifact_root=tmp_path / "first-run-artifacts",
+    )
+    persistent_dir = tmp_path / "persistent" / "checkpoints"
+    common = {
+        "train_manifest_path": train_manifest_path,
+        "dev_manifest_path": dev_manifest_path,
+        "flir_train_root": train_root,
+        "flir_dev_root": dev_root,
+        "epochs": 2,
+        "batch_size": 1,
+        "warmup_steps": 0,
+        "checkpoint_interval_epochs": 1,
+        "device": "cpu",
+        "precision": "fp32",
+        "num_workers": 0,
+        "run_id": "r100-test",
+        "persistent_checkpoint_dir": persistent_dir,
+    }
+
+    first = run_real_baseline_training(
+        RealBaselineTrainConfig(**common, max_epochs_this_invocation=1),
+        first_settings,
+        model_factory=_tiny_model_factory(),
+    )
+
+    assert first.complete is False
+    assert first.train_sample_count == 2
+    assert first.dev_sample_count == 1
+    assert first.completed_epochs == 1
+    assert first.completed_steps == 2
+    assert first.resolved_config_path.exists()
+    assert len(first.persisted_checkpoints) == 1
+    epoch_one = persistent_dir / "model-epoch-001.pt"
+    assert epoch_one.exists()
+    assert epoch_one.with_name("model-epoch-001.pt.COMPLETED.json").exists()
+
+    resumed_settings = first_settings.model_copy(
+        update={"artifact_root": tmp_path / "resumed-run-artifacts"}
+    )
+    resumed = run_real_baseline_training(
+        RealBaselineTrainConfig(**common, resume_from_checkpoint=epoch_one),
+        resumed_settings,
+        model_factory=_tiny_model_factory(),
+    )
+
+    assert resumed.complete is True
+    assert resumed.resumed_from_epoch == 1
+    assert resumed.completed_epochs == 2
+    assert resumed.completed_steps == 4
+    assert math.isfinite(resumed.final_train_loss)
+    assert math.isfinite(resumed.final_dev_loss)
+    epoch_two = persistent_dir / "model-epoch-002.pt"
+    bundle = torch.load(epoch_two, map_location="cpu", weights_only=True)
+    assert bundle["schema_version"] == BASELINE_CHECKPOINT_SCHEMA_VERSION
+    assert bundle["target_epochs"] == 2
+    assert bundle["completed_epochs"] == 2

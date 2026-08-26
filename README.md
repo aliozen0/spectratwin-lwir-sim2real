@@ -22,6 +22,8 @@ modeling and sensor simulation as the research variables.
 - dataset EDA and sequence-aware split validation,
 - a minimal RT-DETRv2 real-data train/eval smoke loop,
 - resumable model and optimizer checkpoints with identity validation,
+- a full-manifest R100 training path with deterministic epoch ordering,
+  versioned persistent checkpoints and completed-checkpoint benchmark guards,
 - deterministic urban-intersection scene descriptions and collision-aware
   placement for people, cars and bicycles,
 - camera intrinsics, bounded poses and explicit world/camera transforms,
